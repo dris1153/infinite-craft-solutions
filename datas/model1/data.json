@@ -1,0 +1,55 @@
+{
+    "base_elements": [
+        "fire",
+        "water",
+        "wind",
+        "earth"
+    ],
+    "combinations": [
+        [
+            [
+                "water",
+                "fire"
+            ],
+            "steam"
+        ],
+        [
+            [
+                "water",
+                "earth"
+            ],
+            "plant"
+        ],
+        [
+            [
+                "fire",
+                "steam"
+            ],
+            "engine"
+        ],
+        [
+            [
+                "engine",
+                "earth"
+            ],
+            "tractor"
+        ],
+        [
+            [
+                "fire",
+                "water"
+            ],
+            "steam"
+        ]
+    ],
+    "all_elements": [
+        "water",
+        "fire",
+        "engine",
+        "wind",
+        "steam",
+        "plant",
+        "tractor",
+        "earth"
+    ]
+}
