@@ -2,10 +2,22 @@ import numpy as np
 import json
 import pickle
 import os
+import nltk
+from nltk.corpus import words, wordnet
 from sklearn.preprocessing import LabelEncoder
-from tensorflow.keras.models import Sequential, save_model, load_model
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.utils import to_categorical
+import random
+
+# Download required NLTK data
+nltk.download('words', quiet=True)
+
+print ("nltk words downloading...")
+
+nltk.download('wordnet', quiet=True)
+
+print ("nltk wordnet downloading...")
 
 class ElementCombiner:
     def __init__(self):
@@ -13,13 +25,15 @@ class ElementCombiner:
         self.base_elements = ['fire', 'water', 'wind', 'earth']
         
         # Define known combinations and results
-        self.combinations = [
-            (['water', 'fire'], 'steam'),
-            (['water', 'earth'], 'plant'),
-            (['fire', 'steam'], 'engine'),
-            (['engine', 'earth'], 'tractor')
-        ]
+        self.combinations = {
+            (frozenset(['water', 'fire']), 'steam'),
+            (frozenset(['water', 'earth']), 'plant'),
+            (frozenset(['fire', 'steam']), 'engine'),
+            (frozenset(['engine', 'earth']), 'tractor')
+        }
         
+        # Load English words
+        self.english_words = set(word.lower() for word in words.words())
         self._initialize_elements()
     
     def _initialize_elements(self):
@@ -29,7 +43,7 @@ class ElementCombiner:
             self.all_elements.add(result)
             self.all_elements.update(combo)
         
-        self.all_elements = list(self.all_elements)
+        self.all_elements = list(sorted(self.all_elements))  # Sort for consistency
         
         # Initialize label encoders
         self.element_encoder = LabelEncoder()
@@ -37,26 +51,25 @@ class ElementCombiner:
 
     def save_state(self, model, model_name):
         """Save model, combinations, and encoder state"""
-        # Create directories if they don't exist
         base_path = os.path.join("datas", model_name)
         os.makedirs(base_path, exist_ok=True)
         
-        # Save the model
-        # save_model(model, os.path.join(base_path, "model.h5"))
-
         model.save(os.path.join(base_path, "model.keras"))
         
-        # Save combinations and elements
+        # Convert frozensets to lists for JSON serialization
+        serializable_combinations = [
+            ([list(combo), result]) for combo, result in self.combinations
+        ]
+        
         state = {
             'base_elements': self.base_elements,
-            'combinations': self.combinations,
+            'combinations': serializable_combinations,
             'all_elements': self.all_elements
         }
         
         with open(os.path.join(base_path, "data.json"), 'w') as f:
             json.dump(state, f, indent=4)
             
-        # Save the LabelEncoder
         with open(os.path.join(base_path, "encoder.pkl"), 'wb') as f:
             pickle.dump(self.element_encoder, f)
             
@@ -77,10 +90,15 @@ class ElementCombiner:
             state = json.load(f)
             
         instance.base_elements = state['base_elements']
-        instance.combinations = state['combinations']
+        # Convert lists back to frozensets
+        instance.combinations = {
+            (frozenset(combo), result) for [combo, result] in state['combinations']
+        }
         instance.all_elements = state['all_elements']
         
-        # Load the LabelEncoder
+        # Load English words
+        instance.english_words = set(word.lower() for word in words.words())
+        
         with open(os.path.join(base_path, "encoder.pkl"), 'rb') as f:
             instance.element_encoder = pickle.load(f)
             
@@ -107,37 +125,115 @@ class ElementCombiner:
             ):
                 models.append(model_name)
         return models
-        
+
+    def get_combination_result(self, elem1, elem2):
+        """Get the known result for a combination of elements"""
+        combo = frozenset([elem1, elem2])
+        for known_combo, result in self.combinations:
+            if combo == known_combo:
+                return result
+        return None
+    
     def add_combination(self, elem1, elem2, result):
         """Add a new combination to the training data"""
-        self.combinations.append(([elem1, elem2], result))
+        combo = frozenset([elem1, elem2])
+        self.combinations.add((combo, result))
         
         # Update all_elements if new elements were introduced
         new_elements = {elem1, elem2, result}
         if not new_elements.issubset(self.all_elements):
-            self.all_elements.extend(list(new_elements - set(self.all_elements)))
+            self.all_elements.extend(sorted(list(new_elements - set(self.all_elements))))
             self.element_encoder.fit(self.all_elements)
+    
+    def get_related_words(self, word1, word2):
+        """Get related English words based on WordNet relationships"""
+        related_words = set()
+        
+        # Get synsets for both words
+        synsets1 = wordnet.synsets(word1)
+        synsets2 = wordnet.synsets(word2)
+        
+        for syn1 in synsets1:
+            # Get hypernyms (more general terms)
+            for hypernym in syn1.hypernyms():
+                related_words.update(lemma.name().lower() for lemma in hypernym.lemmas())
+            
+            # Get hyponyms (more specific terms)
+            for hyponym in syn1.hyponyms():
+                related_words.update(lemma.name().lower() for lemma in hyponym.lemmas())
+                
+        for syn2 in synsets2:
+            for hypernym in syn2.hypernyms():
+                related_words.update(lemma.name().lower() for lemma in hypernym.lemmas())
+            for hyponym in syn2.hyponyms():
+                related_words.update(lemma.name().lower() for lemma in hyponym.lemmas())
+        
+        # Filter out multi-word expressions and non-alphabet words
+        related_words = {word for word in related_words 
+                        if word.isalpha() and '_' not in word}
+        
+        return related_words
+
+    def generate_new_element(self, elem1, elem2):
+        """Generate a new element name based on the combination of two elements"""
+        # First try to get semantically related words
+        related_words = self.get_related_words(elem1, elem2)
+        
+        # Filter words that are not already elements
+        existing_elements = {result for _, result in self.combinations}
+        existing_elements.update(self.base_elements)
+        
+        candidate_words = related_words - existing_elements
+        
+        if candidate_words:
+            # Prefer shorter words (length 4-8 characters)
+            preferred_words = [word for word in candidate_words 
+                             if 4 <= len(word) <= 8]
+            if preferred_words:
+                return random.choice(preferred_words)
+            return random.choice(list(candidate_words))
+        
+        # Fallback: find words that share some letters with both elements
+        common_letters = set(elem1).intersection(set(elem2))
+        if common_letters:
+            candidates = [word for word in self.english_words 
+                        if any(letter in word for letter in common_letters)
+                        and word not in existing_elements
+                        and 4 <= len(word) <= 8]
+            if candidates:
+                return random.choice(candidates)
+        
+        # Final fallback: return a random English word
+        while True:
+            word = random.choice(list(self.english_words))
+            if word not in existing_elements and 4 <= len(word) <= 8:
+                return word
         
     def prepare_data(self):
         X = []  # Input combinations
         y = []  # Results
         
         # Convert combinations to training data
-        for (elem1, elem2), result in self.combinations:
-            # Encode input elements
-            elem1_encoded = self.element_encoder.transform([elem1])[0]
-            elem2_encoded = self.element_encoder.transform([elem2])[0]
+        for combo, result in self.combinations:
+            # Create both orderings of elements for training
+            elements = list(combo)
+            pairs = [(elements[0], elements[1]), (elements[1], elements[0])]
             
-            # Create input vector
-            input_vector = np.zeros(len(self.all_elements) * 2)
-            input_vector[elem1_encoded] = 1
-            input_vector[elem2_encoded + len(self.all_elements)] = 1
-            
-            X.append(input_vector)
-            
-            # Encode output
-            result_encoded = self.element_encoder.transform([result])[0]
-            y.append(result_encoded)
+            for elem1, elem2 in pairs:
+                # Encode input elements
+                elem1_encoded = self.element_encoder.transform([elem1])[0]
+                elem2_encoded = self.element_encoder.transform([elem2])[0]
+                
+                # Create input vector
+                input_vector = np.zeros(len(self.all_elements) * 2)
+                input_vector[elem1_encoded] = 1
+                input_vector[elem2_encoded + len(self.all_elements)] = 1
+                
+                X.append(input_vector)
+                
+                # Encode output
+                result_encoded = self.element_encoder.transform([result])[0]
+                y.append(result_encoded)
         
         X = np.array(X)
         y = to_categorical(y, num_classes=len(self.all_elements))
@@ -163,32 +259,22 @@ class ElementCombiner:
     def train_model(self, model, epochs=200):
         X, y = self.prepare_data()
         model.fit(X, y, epochs=epochs, verbose=0)
-        
+
     def predict_combination(self, model, element1, element2):
-        # Encode input elements
-        try:
-            elem1_encoded = self.element_encoder.transform([element1])[0]
-            elem2_encoded = self.element_encoder.transform([element2])[0]
-        except ValueError:
-            return "Unknown element(s)", 0.0
+        """Predict the result of combining two elements"""
+        # First check if this is a known combination
+        known_result = self.get_combination_result(element1, element2)
+        if known_result is not None:
+            return known_result, 1.0
         
-        # Create input vector
-        input_vector = np.zeros(len(self.all_elements) * 2)
-        input_vector[elem1_encoded] = 1
-        input_vector[elem2_encoded + len(self.all_elements)] = 1
-        
-        # Make prediction
-        prediction = model.predict(np.array([input_vector]), verbose=0)
-        predicted_idx = np.argmax(prediction[0])
-        
-        # Decode prediction
-        result = self.element_encoder.inverse_transform([predicted_idx])[0]
-        confidence = prediction[0][predicted_idx]
-        
-        return result, confidence
+        # For new combinations, generate a new element name
+        new_element = self.generate_new_element(element1, element2)
+        return new_element, 0.5  # Use 0.5 confidence for new generations
 
 def main():
-    print("Choose an option:")
+    print("\nEnhanced Element Combiner - Create new elements by combining existing ones!")
+    print("This version creates meaningful new elements from English words!")
+    print("\nChoose an option:")
     print("1. Start new model")
     print("2. Load existing model")
     choice = input("Enter choice (1 or 2): ")
@@ -208,7 +294,6 @@ def main():
             
             model_choice = input("\nEnter model number or name: ")
             try:
-                # Try to get model by number
                 idx = int(model_choice) - 1
                 if 0 <= idx < len(available_models):
                     model_name = available_models[idx]
@@ -228,13 +313,14 @@ def main():
                 model = combiner.create_model()
                 combiner.train_model(model)
     else:
-        # Start new model
         combiner = ElementCombiner()
         model = combiner.create_model()
         combiner.train_model(model)
     
     while True:
         print("\nEnter two elements to combine (or 'quit' to exit, 'save' to save model):")
+        print("Available base elements:", ", ".join(combiner.base_elements))
+        print("Known elements:", ", ".join(sorted(combiner.all_elements)))
         elem1 = input("First element: ").lower()
         
         if elem1 == 'quit':
@@ -251,13 +337,20 @@ def main():
         # Make prediction
         result, confidence = combiner.predict_combination(model, elem1, elem2)
         print(f"\nPredicted result: {result}")
+        
+        if confidence == 1.0:
+            print("(This is a known combination)")
+        else:
+            print("(This is a suggested new combination using a related English word)")
         print(f"Confidence: {confidence:.2%}")
         
-        # Ask for evaluation
-        evaluation = input("\nIs this prediction correct? (yes/no): ").lower()
+        # Ask if this combination exists
+        agree_result = input("\nDo you agree this result? (yes/no/skip): ").lower()
         
-        if evaluation == 'no':
-            # Get correct answer and retrain
+        if agree_result == 'skip':
+            pass
+
+        elif agree_result == 'no':
             correct_result = input("What is the correct result? ").lower()
             
             # Add new combination to training data
@@ -266,11 +359,24 @@ def main():
             # Recreate and retrain model with updated data
             model = combiner.create_model()
             combiner.train_model(model)
-            print("\nModel retrained with new combination!")
+            print("\nCombination added to known combinations!")
+        else:
+            # Only for new combinations
+            if confidence < 1.0:
+                keep_suggestion = input("Would you like to keep the suggested combination? (yes/no): ").lower()
+                if keep_suggestion == 'yes':
+                    # Add the suggested combination
+                    combiner.add_combination(elem1, elem2, result)
+                    
+                    # Recreate and retrain model with updated data
+                    model = combiner.create_model()
+                    combiner.train_model(model)
+                    print("\nSuggested combination added to known combinations!")
         
         print("\nKnown combinations:")
-        for (e1, e2), res in combiner.combinations:
-            print(f"{e1} + {e2} = {res}")
+        for combo, res in combiner.combinations:
+            elements = list(combo)
+            print(f"{elements[0]} + {elements[1]} = {res}")
 
 if __name__ == "__main__":
     main()
