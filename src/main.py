@@ -2,130 +2,82 @@ import numpy as np
 import json
 import pickle
 import os
-import nltk # type: ignore
-from nltk.corpus import words, wordnet # type: ignore
-from nltk.tag import pos_tag # type: ignore
-from sklearn.preprocessing import LabelEncoder
+import requests
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense
 from tensorflow.keras.utils import to_categorical
+from sklearn.preprocessing import LabelEncoder
+import threading
 import random
 
-# Download required NLTK data
-print("Downloading NLTK data...")
-nltk.download('words', quiet=True)
-nltk.download('wordnet', quiet=True)
-nltk.download('averaged_perceptron_tagger', quiet=True)
-nltk.download('averaged_perceptron_tagger_eng', quiet=True)
 
 data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "datas"))
 
 class ElementCombiner:
     def __init__(self):
-        # Define base elements
-        self.base_elements = ['fire', 'water', 'wind', 'earth']
-        
-        # Define known combinations and results
-        self.combinations = {
-            (frozenset(['water', 'fire']), 'steam'),
-            (frozenset(['water', 'earth']), 'mud'),
-            (frozenset(['fire', 'earth']), 'metal'),
-            (frozenset(['wind', 'water']), 'mist')
+        # Define base elements with emojis
+        self.base_elements = {
+            'fire': '🔥',
+            'water': '💧',
+            'wind': '💨',
+            'earth': '🌎'
         }
         
-        # Load English words
-        self.english_words = set(word.lower() for word in words.words())
+        # Define known combinations and results with emojis
+        self.combinations = {
+            (frozenset(['water', 'fire']), ('steam', '💨')),
+            (frozenset(['water', 'earth']), ('plant', '🌱')),
+            (frozenset(['fire', 'earth']), ('lava', '🌋')),
+            (frozenset(['wind', 'water']), ('wave', '🌊')),
+            (frozenset(['wind', 'fire']), ('smoke', '💨')),
+            (frozenset(['wind', 'earth']), ('dust', '🌫️'))
+        }
+        
         self._initialize_elements()
     
     def _initialize_elements(self):
         # Create a set of all unique elements
-        self.all_elements = set(self.base_elements)
-        for combo, result in self.combinations:
-            self.all_elements.add(result)
-            self.all_elements.update(combo)
+        self.all_elements = set(self.base_elements.keys())
+        self.element_emojis = dict(self.base_elements)
         
-        self.all_elements = list(sorted(self.all_elements))  # Sort for consistency
+        for combo, result in self.combinations:
+            result_name, result_emoji = result
+            self.all_elements.add(result_name)
+            self.all_elements.update(combo)
+            self.element_emojis[result_name] = result_emoji
+        
+        self.all_elements = list(sorted(self.all_elements))
         
         # Initialize label encoders
         self.element_encoder = LabelEncoder()
         self.element_encoder.fit(self.all_elements)
 
-    def save_state(self, model, model_name):
-        """Save model, combinations, and encoder state"""
-        base_path = os.path.join(data_path, model_name)
-        os.makedirs(base_path, exist_ok=True)
+    def get_api_combination(self, elem1, elem2):
+        """Get combination result from the API"""
+        try:
+            response = requests.get(f'https://infiniteback.org/pair?first={elem1.capitalize()}&second={elem2.capitalize()}')
+            if response.status_code == 200:
+                data = response.json()
+                return data['result'].lower(), data['emoji']
+            return None, None
+        except Exception as e:
+            print(f"API Error: {e}")
+            return None, None
+
+    def predict_combination(self, model, element1, element2):
+        """Predict the result of combining two elements"""
+        # First check if this is a known combination
+        known_result = self.get_combination_result(element1, element2)
+        if known_result is not None:
+            return known_result[0], known_result[1], 1.0
         
-        model.save(os.path.join(base_path, "model.keras"))
+        # For new combinations, call the API
+        new_element, emoji = self.get_api_combination(element1, element2)
+        if new_element and emoji:
+            return new_element, emoji, 0.5
         
-        # Convert frozensets to lists for JSON serialization
-        serializable_combinations = [
-            ([list(combo), result]) for combo, result in self.combinations
-        ]
-        
-        state = {
-            'base_elements': self.base_elements,
-            'combinations': serializable_combinations,
-            'all_elements': self.all_elements
-        }
-        
-        with open(os.path.join(base_path, "data.json"), 'w') as f:
-            json.dump(state, f, indent=4)
-            
-        with open(os.path.join(base_path, "encoder.pkl"), 'wb') as f:
-            pickle.dump(self.element_encoder, f)
-            
-        print(f"Model saved in folder: {base_path}")
-            
-    @classmethod
-    def load_state(cls, model_name):
-        """Load a saved state and return a new ElementCombiner instance"""
-        base_path = os.path.join(data_path, model_name)
-        
-        if not os.path.exists(base_path):
-            raise FileNotFoundError(f"Model folder not found: {base_path}")
-            
-        instance = cls.__new__(cls)
-        
-        # Load combinations and elements
-        with open(os.path.join(base_path, "data.json"), 'r') as f:
-            state = json.load(f)
-            
-        instance.base_elements = state['base_elements']
-        # Convert lists back to frozensets
-        instance.combinations = {
-            (frozenset(combo), result) for [combo, result] in state['combinations']
-        }
-        instance.all_elements = state['all_elements']
-        
-        # Load English words
-        instance.english_words = set(word.lower() for word in words.words())
-        
-        with open(os.path.join(base_path, "encoder.pkl"), 'rb') as f:
-            instance.element_encoder = pickle.load(f)
-            
-        return instance
-    
-    @staticmethod
-    def load_model(model_name):
-        """Load a saved model"""
-        model_path = os.path.join(data_path, model_name, "model.keras")
-        return load_model(model_path)
-    
-    @staticmethod
-    def list_available_models():
-        """List all available models in the datas directory"""
-        if not os.path.exists(data_path):
-            return []
-        
-        models = []
-        for model_name in os.listdir(data_path):
-            model_path = os.path.join(data_path, model_name)
-            if os.path.isdir(model_path) and all(
-                os.path.exists(os.path.join(model_path, f))
-                for f in ["model.keras", "data.json", "encoder.pkl"]
-            ):
-                models.append(model_name)
-        return models
+        # Fallback to model prediction if API fails
+        return None, None, 0.0
 
     def get_combination_result(self, elem1, elem2):
         """Get the known result for a combination of elements"""
@@ -135,101 +87,26 @@ class ElementCombiner:
                 return result
         return None
     
-    def add_combination(self, elem1, elem2, result):
-        """Add a new combination to the training data, replacing any existing combination"""
+    def add_combination(self, elem1, elem2, result, emoji):
+        """Add a new combination to the training data"""
         combo = frozenset([elem1, elem2])
         # Remove any existing combination with the same elements
         self.combinations = {c for c in self.combinations if c[0] != combo}
-        self.combinations.add((combo, result))
+        self.combinations.add((combo, (result, emoji)))
         
-        # Update all_elements if new elements were introduced
-        new_elements = {elem1, elem2, result}
-        if not new_elements.issubset(self.all_elements):
-            self.all_elements.extend(sorted(list(new_elements - set(self.all_elements))))
+        # Update all_elements and emojis if new elements were introduced
+        if result not in self.all_elements:
+            self.all_elements.append(result)
+            self.element_emojis[result] = emoji
             self.element_encoder.fit(self.all_elements)
-    
-    def get_related_words(self, word1, word2):
-        """Get related English nouns based on WordNet relationships"""
-        related_words = set()
-        
-        # Get synsets for both words (nouns only)
-        synsets1 = wordnet.synsets(word1, pos=wordnet.NOUN)
-        synsets2 = wordnet.synsets(word2, pos=wordnet.NOUN)
-        
-        for syn1 in synsets1:
-            # Get hypernyms (more general terms)
-            for hypernym in syn1.hypernyms():
-                related_words.update(lemma.name().lower() for lemma in hypernym.lemmas())
-            
-            # Get hyponyms (more specific terms)
-            for hyponym in syn1.hyponyms():
-                related_words.update(lemma.name().lower() for lemma in hyponym.lemmas())
-                
-        for syn2 in synsets2:
-            for hypernym in syn2.hypernyms():
-                related_words.update(lemma.name().lower() for lemma in hypernym.lemmas())
-            for hyponym in syn2.hyponyms():
-                related_words.update(lemma.name().lower() for lemma in hyponym.lemmas())
-        
-        # Helper function to check if a word is a noun
-        def is_noun(word):
-            tagged = pos_tag([word])
-            return tagged[0][1].startswith('NN')
-        
-        # Filter out multi-word expressions, non-alphabet words, and non-nouns
-        related_words = {word for word in related_words 
-                        if word.isalpha() and '_' not in word and is_noun(word)}
-        
-        return related_words
 
-    def generate_new_element(self, elem1, elem2):
-        """Generate a new element name based on the combination of two elements (nouns only)"""
-        # First try to get semantically related nouns
-        related_words = self.get_related_words(elem1, elem2)
-        
-        # Filter words that are not already elements
-        existing_elements = {result for _, result in self.combinations}
-        existing_elements.update(self.base_elements)
-        
-        candidate_words = related_words - existing_elements
-        
-        if candidate_words:
-            # Prefer shorter words (length 4-8 characters)
-            preferred_words = [word for word in candidate_words 
-                             if 4 <= len(word) <= 8]
-            if preferred_words:
-                return random.choice(preferred_words)
-            return random.choice(list(candidate_words))
-        
-        # Fallback: find noun words that share some letters with both elements
-        common_letters = set(elem1).intersection(set(elem2))
-        if common_letters:
-            # Get all English words that are nouns
-            english_nouns = {word for word in self.english_words 
-                           if pos_tag([word])[0][1].startswith('NN')}
-            
-            candidates = [word for word in english_nouns 
-                        if any(letter in word for letter in common_letters)
-                        and word not in existing_elements
-                        and 4 <= len(word) <= 8]
-            if candidates:
-                return random.choice(candidates)
-        
-        # Final fallback: return a random English noun
-        while True:
-            word = random.choice(list(self.english_words))
-            if (word not in existing_elements and 
-                4 <= len(word) <= 8 and 
-                pos_tag([word])[0][1].startswith('NN')):
-                return word
-    
     def prepare_data(self):
         """Prepare training data for the model"""
         X = []  # Input combinations
         y = []  # Results
         
         # Convert combinations to training data
-        for combo, result in self.combinations:
+        for combo, (result, _) in self.combinations:
             # Create both orderings of elements for training
             elements = list(combo)
             pairs = [(elements[0], elements[1]), (elements[1], elements[0])]
@@ -277,25 +154,228 @@ class ElementCombiner:
         X, y = self.prepare_data()
         model.fit(X, y, epochs=epochs, verbose=0)
 
-    def predict_combination(self, model, element1, element2):
-        _ = model  # Access the model parameter to avoid unused parameter warning
-        """Predict the result of combining two elements"""
-        # First check if this is a known combination
-        known_result = self.get_combination_result(element1, element2)
-        if known_result is not None:
-            return known_result, 1.0
+    def get_random_elements(self):
+        """Get two random elements, prioritizing uncombined pairs"""
+        all_elements_list = list(self.all_elements)
         
-        # For new combinations, generate a new element name
-        new_element = self.generate_new_element(element1, element2)
-        return new_element, 0.5  # Use 0.5 confidence for new generations
+        # Create a set of all possible combinations
+        all_possible = set()
+        for i in range(len(all_elements_list)):
+            for j in range(len(all_elements_list)):
+                if (all_elements_list[i] != "" and all_elements_list[j] != "" and all_elements_list[i] != all_elements_list[j]):
+                    all_possible.add(frozenset([all_elements_list[i], all_elements_list[j]]))
+        
+        # Get set of existing combinations
+        existing_combos = {combo for combo, _ in self.combinations}
+        
+        # Find combinations that don't exist yet
+        uncombined = list(all_possible - existing_combos)
+        
+        if uncombined:
+            # Prioritize uncombined pairs
+            t = random.choice(uncombined)
+            chosen_pair = list(t)
+            return chosen_pair[0], chosen_pair[1]
+        else:
+            # If all pairs are combined, choose random elements
+            elem1 = random.choice(all_elements_list)
+            elem2 = random.choice(all_elements_list)
+            return elem1, elem2
+
+    def auto_train(self, model, amount, auto_pass=False):
+        """Auto train the model with random combinations"""
+        trained_count = 0
+        
+        print(f"\nStarting auto training for {amount} combinations...")
+        print("Press Ctrl+C to stop at any time\n")
+        
+        try:
+            while trained_count < amount:
+                elem1, elem2 = self.get_random_elements()
+                result, emoji, confidence = self.predict_combination(model, elem1, elem2)
+                
+                print(f"\nTrying combination {trained_count + 1}/{amount}")
+                print(f"Elements: {elem1} {self.element_emojis.get(elem1, '')} + "
+                    f"{elem2} {self.element_emojis.get(elem2, '')}")
+                
+                if result:
+                    print(f"Predicted result: {result} {emoji}")
+                    print(f"Confidence: {confidence:.2%}")
+                    
+                    if auto_pass:
+                        if confidence < 1.0:
+                            self.add_combination(elem1, elem2, result, emoji)
+                            model = self.create_model()
+                            self.train_model(model)
+                            print("Combination automatically added!")
+                            trained_count += 1
+                    else:
+                        agree_result = input("\nDo you agree with this result? (yes/no/skip): ").lower()
+                        
+                        if agree_result == 'skip':
+                            continue
+                        elif agree_result == 'no':
+                            correct_result = input("What is the correct result? ").lower()
+                            correct_emoji = input("What emoji should represent this result? ")
+                            
+                            self.add_combination(elem1, elem2, correct_result, correct_emoji)
+                            model = self.create_model()
+                            self.train_model(model)
+                            print("\nCombination added to known combinations!")
+                            trained_count += 1
+                        elif agree_result == 'yes' and confidence < 1.0:
+                            self.add_combination(elem1, elem2, result, emoji)
+                            model = self.create_model()
+                            self.train_model(model)
+                            print("\nSuggested combination added to known combinations!")
+                            trained_count += 1
+                else:
+                    print("\nFailed to generate combination. Trying another...")
+                    
+                print(f"\nProgress: {trained_count}/{amount} combinations trained")
+                
+        except KeyboardInterrupt:
+            print("\n\nAuto training interrupted by user")
+        
+        return model
+    
+    def save_state(self, model, model_name):
+        """Save model, combinations, and encoder state"""
+        base_path = os.path.join(data_path, model_name)
+        os.makedirs(base_path, exist_ok=True)
+        
+        model.save(os.path.join(base_path, "model.keras"))
+        
+        # Convert frozensets to lists for JSON serialization
+        serializable_combinations = [
+            ([list(combo), list(result)]) for combo, result in self.combinations
+        ]
+        
+        state = {
+            'base_elements': self.base_elements,
+            'combinations': serializable_combinations,
+            'all_elements': self.all_elements,
+            'element_emojis': self.element_emojis
+        }
+        
+        with open(os.path.join(base_path, "data.json"), 'w') as f:
+            json.dump(state, f, indent=4)
+            
+        with open(os.path.join(base_path, "encoder.pkl"), 'wb') as f:
+            pickle.dump(self.element_encoder, f)
+            
+        print(f"Model saved in folder: {base_path}")
+            
+    @classmethod
+    def load_state(cls, model_name):
+        """Load a saved state"""
+        base_path = os.path.join(data_path, model_name)
+        
+        if not os.path.exists(base_path):
+            raise FileNotFoundError(f"Model folder not found: {base_path}")
+            
+        instance = cls.__new__(cls)
+        
+        # Load state data
+        with open(os.path.join(base_path, "data.json"), 'r') as f:
+            state = json.load(f)
+            
+        instance.base_elements = state['base_elements']
+        instance.combinations = {
+            (frozenset(combo), tuple(result)) for [combo, result] in state['combinations']
+        }
+        instance.all_elements = state['all_elements']
+        
+        # Handle backward compatibility for element_emojis
+        if 'element_emojis' in state:
+            instance.element_emojis = state['element_emojis']
+        else:
+            # Reconstruct element_emojis from base_elements and combinations
+            instance.element_emojis = dict(instance.base_elements)
+            for combo, (result, emoji) in instance.combinations:
+                if isinstance(result, str):  # Handle old format where result might be just a string
+                    instance.element_emojis[result] = '❓'  # Default emoji for old entries
+                else:
+                    instance.element_emojis[result[0]] = result[1]
+        
+        with open(os.path.join(base_path, "encoder.pkl"), 'rb') as f:
+            instance.element_encoder = pickle.load(f)
+            
+        return instance
+    
+    @staticmethod
+    def load_model(model_name):
+        """Load a saved model"""
+        model_path = os.path.join(data_path, model_name, "model.keras")
+        return load_model(model_path)
+    
+    @staticmethod
+    def list_available_models():
+        """List all available models in the datas directory"""
+        if not os.path.exists(data_path):
+            return []
+        
+        models = []
+        for model_name in os.listdir(data_path):
+            model_path = os.path.join(data_path, model_name)
+            if os.path.isdir(model_path) and all(
+                os.path.exists(os.path.join(model_path, f))
+                for f in ["model.keras", "data.json", "encoder.pkl"]
+            ):
+                models.append(model_name)
+        return models
+
+    def generate_js_code(combiner):
+        """Generate JavaScript code for localStorage"""
+        # Convert elements to required format
+        elements = []
+        
+        # Add base elements
+        for text, emoji in combiner.base_elements.items():
+            elements.append({
+                "text": text.capitalize(),
+                "emoji": emoji,
+                "discovered": False
+            })
+        
+        # Add combined elements
+        for combo, (text, emoji) in combiner.combinations:
+            if text not in combiner.base_elements:  # Avoid duplicates
+                elements.append({
+                    "text": text.capitalize(),
+                    "emoji": emoji,
+                    "discovered": False
+                })
+        
+        # Create the data object
+        data = {
+            "elements": elements,
+            "darkMode": True
+        }
+        
+        # Generate the JavaScript code
+        js_code = f"""
+    // Element Combiner Data
+    const elementData = {json.dumps(data, indent=2)};
+
+    // Store in localStorage
+    localStorage.setItem('infinite-craft-data', JSON.stringify(elementData));
+
+    // Verification code (optional)
+    const stored = localStorage.getItem('infinite-craft-data');
+    console.log('Stored data:', JSON.parse(stored));
+    """
+        return js_code
 
 def main():
     print("\nEnhanced Element Combiner - Create new elements by combining existing ones!")
-    print("This version creates meaningful noun-based elements!")
+    print("Now with emoji support! 🎮")
     print("\nChoose an option:")
     print("1. Start new model")
     print("2. Load existing model")
-    choice = input("Enter choice (1 or 2): ")
+    print("3. Gen element code")
+    print("4. Auto train multi combination")
+    choice = input("Enter choice (1-4): ")
     
     if choice == "2":
         # Show available models
@@ -330,6 +410,108 @@ def main():
                 combiner = ElementCombiner()
                 model = combiner.create_model()
                 combiner.train_model(model)
+    elif choice == "3":
+        # Handle code generation
+        print("\nSelect a model to generate code from:")
+        available_models = ElementCombiner.list_available_models()
+        
+        if not available_models:
+            print("No saved models found. Starting with default elements...")
+            combiner = ElementCombiner()
+        else:
+            print("\nAvailable models:")
+            for i, model_name in enumerate(available_models, 1):
+                print(f"{i}. {model_name}")
+            
+            model_choice = input("\nEnter model number or name (or press Enter for default): ")
+            
+            if not model_choice:
+                combiner = ElementCombiner()
+            else:
+                try:
+                    idx = int(model_choice) - 1
+                    if 0 <= idx < len(available_models):
+                        model_name = available_models[idx]
+                    else:
+                        model_name = model_choice
+                except ValueError:
+                    model_name = model_choice
+                
+                try:
+                    combiner = ElementCombiner.load_state(model_name)
+                except FileNotFoundError:
+                    print(f"Model not found. Using default elements...")
+                    combiner = ElementCombiner()
+        
+        # Generate and display the code
+        js_code = ElementCombiner.generate_js_code(combiner)
+        print("\nGenerated JavaScript Code:")
+        print(js_code)
+        
+        # Offer to save to file
+        save_choice = input("\nWould you like to save this code to a file? (yes/no): ").lower()
+        if save_choice == 'yes':
+            filename = input("Enter filename (default: element_data.js): ").strip() or "element_data.js"
+            with open(filename + ".js", 'w', encoding='utf-8') as f:
+                f.write(js_code)
+            print(f"\nCode saved to {filename}")
+        
+        return
+    elif choice == "4":
+        # Handle auto training
+        print("\nSelect a model to auto train:")
+        available_models = ElementCombiner.list_available_models()
+        
+        if not available_models:
+            print("No saved models found. Starting with default elements...")
+            combiner = ElementCombiner()
+            model = combiner.create_model()
+            combiner.train_model(model)
+        else:
+            print("\nAvailable models:")
+            for i, model_name in enumerate(available_models, 1):
+                print(f"{i}. {model_name}")
+            
+            model_choice = input("\nEnter model number or name (or press Enter for default): ")
+            
+            if not model_choice:
+                combiner = ElementCombiner()
+                model = combiner.create_model()
+                combiner.train_model(model)
+            else:
+                try:
+                    idx = int(model_choice) - 1
+                    if 0 <= idx < len(available_models):
+                        model_name = available_models[idx]
+                    else:
+                        model_name = model_choice
+                except ValueError:
+                    model_name = model_choice
+                
+                try:
+                    combiner = ElementCombiner.load_state(model_name)
+                    model = ElementCombiner.load_model(model_name)
+                    print(f"Model '{model_name}' loaded successfully!")
+                except FileNotFoundError:
+                    print("Model not found. Starting with default elements...")
+                    combiner = ElementCombiner()
+                    model = combiner.create_model()
+                    combiner.train_model(model)
+        
+        # Get auto training parameters
+        amount = int(input("\nHow many combinations do you want to train? "))
+        auto_pass = input("Auto pass combinations? (yes/no): ").lower() == 'yes'
+        
+        # Start auto training
+        model = combiner.auto_train(model, amount, auto_pass)
+        
+        # Ask to save the model
+        save_choice = input("\nWould you like to save the trained model? (yes/no): ").lower()
+        if save_choice == 'yes':
+            model_name = input("Enter model name: ")
+            combiner.save_state(model, model_name)
+        
+        return
     else:
         combiner = ElementCombiner()
         model = combiner.create_model()
@@ -337,8 +519,15 @@ def main():
     
     while True:
         print("\nEnter two elements to combine (or 'quit' to exit, 'save' to save model):")
-        print("Available base elements:", ", ".join(combiner.base_elements))
-        print("Known elements:", ", ".join(sorted(combiner.all_elements)))
+        print("\nAvailable base elements:")
+        for elem, emoji in combiner.base_elements.items():
+            print(f"{elem} {emoji}")
+        
+        print("\nKnown elements:")
+        for elem in sorted(combiner.all_elements):
+            emoji = combiner.element_emojis.get(elem, '')
+            print(f"{elem} {emoji}")
+            
         elem1 = input("First element: ").lower()
         
         if elem1 == 'quit':
@@ -353,47 +542,52 @@ def main():
             break
         
         # Make prediction
-        result, confidence = combiner.predict_combination(model, elem1, elem2)
-        print(f"\nPredicted result: {result}")
+        result, emoji, confidence = combiner.predict_combination(model, elem1, elem2)
         
-        if confidence == 1.0:
-            print("(This is a known combination)")
-        else:
-            print("(This is a suggested new combination using a related English noun)")
-        print(f"Confidence: {confidence:.2%}")
-        
-        # Ask if this combination exists
-        agree_result = input("\nDo you agree with this result? (yes/no/skip): ").lower()
-        
-        if agree_result == 'skip':
-            pass
-        elif agree_result == 'no':
-            correct_result = input("What is the correct result? ").lower()
+        if result:
+            print(f"\nPredicted result: {result} {emoji}")
             
-            # Add new combination to training data
-            combiner.add_combination(elem1, elem2, correct_result)
+            if confidence == 1.0:
+                print("(This is a known combination)")
+            else:
+                print("(This is a suggested new combination from the API)")
+            print(f"Confidence: {confidence:.2%}")
             
-            # Recreate and retrain model with updated data
-            model = combiner.create_model()
-            combiner.train_model(model)
-            print("\nCombination added to known combinations!")
+            # Ask if this combination exists
+            agree_result = input("\nDo you agree with this result? (yes/no/skip): ").lower()
+            
+            if agree_result == 'skip':
+                pass
+            elif agree_result == 'no':
+                correct_result = input("What is the correct result? ").lower()
+                correct_emoji = input("What emoji should represent this result? ")
+                
+                # Add new combination to training data
+                combiner.add_combination(elem1, elem2, correct_result, correct_emoji)
+                
+                # Recreate and retrain model with updated data
+                model = combiner.create_model()
+                combiner.train_model(model)
+                print("\nCombination added to known combinations!")
+            elif agree_result == 'yes' and confidence < 1.0:
+                # Add the suggested combination
+                combiner.add_combination(elem1, elem2, result, emoji)
+                
+                # Recreate and retrain model with updated data
+                model = combiner.create_model()
+                combiner.train_model(model)
+                print("\nSuggested combination added to known combinations!")
         else:
-            # Only for new combinations
-            if confidence < 1.0:
-                keep_suggestion = input("Would you like to keep the suggested combination? (yes/no): ").lower()
-                if keep_suggestion == 'yes':
-                    # Add the suggested combination
-                    combiner.add_combination(elem1, elem2, result)
-                    
-                    # Recreate and retrain model with updated data
-                    model = combiner.create_model()
-                    combiner.train_model(model)
-                    print("\nSuggested combination added to known combinations!")
+            print("\nFailed to generate combination. Please try again.")
         
         print("\nKnown combinations:")
-        for combo, res in combiner.combinations:
+        for combo, (res, emoji) in combiner.combinations:
             elements = list(combo)
-            print(f"{elements[0]} + {elements[1]} = {res}")
+            print(f"{elements[0]} {combiner.element_emojis.get(elements[0], '')} + "
+                  f"{elements[1]} {combiner.element_emojis.get(elements[1], '')} = "
+                  f"{res} {emoji}")
+
+
 
 if __name__ == "__main__":
     main()
