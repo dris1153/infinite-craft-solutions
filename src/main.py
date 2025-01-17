@@ -23,14 +23,19 @@ class ElementCombiner:
             'earth': '🌎'
         }
         
-        # Define known combinations and results with emojis
+        # Store combinations as sorted tuples for different elements
         self.combinations = {
-            (frozenset(['water', 'fire']), ('steam', '💨')),
-            (frozenset(['water', 'earth']), ('plant', '🌱')),
-            (frozenset(['fire', 'earth']), ('lava', '🌋')),
-            (frozenset(['wind', 'water']), ('wave', '🌊')),
-            (frozenset(['wind', 'fire']), ('smoke', '💨')),
-            (frozenset(['wind', 'earth']), ('dust', '🌫️'))
+            (tuple(sorted(['water', 'fire'])), ('steam', '💨')),
+            (tuple(sorted(['water', 'earth'])), ('plant', '🌱')),
+            (tuple(sorted(['fire', 'earth'])), ('lava', '🌋')),
+            (tuple(sorted(['wind', 'water'])), ('wave', '🌊')),
+            (tuple(sorted(['wind', 'fire'])), ('smoke', '💨')),
+            (tuple(sorted(['wind', 'earth'])), ('dust', '🌫️')),
+            # Same-element combinations (no need to sort)
+            ((tuple(['fire', 'fire'])), ('inferno', '🔥')),
+            ((tuple(['water', 'water'])), ('ocean', '🌊')),
+            ((tuple(['wind', 'wind'])), ('tornado', '🌪️')),
+            ((tuple(['earth', 'earth'])), ('mountain', '⛰️'))
         }
         
         self._initialize_elements()
@@ -79,20 +84,29 @@ class ElementCombiner:
         # Fallback to model prediction if API fails
         return None, None, 0.0
 
+    def get_combination_key(self, elem1, elem2):
+        """Get the standardized combination key"""
+        if elem1 == elem2:
+            return tuple([elem1, elem2])  # Keep same-element combinations as-is
+        return tuple(sorted([elem1, elem2]))  # Sort different elements
+
     def get_combination_result(self, elem1, elem2):
         """Get the known result for a combination of elements"""
-        combo = frozenset([elem1, elem2])
-        for known_combo, result in self.combinations:
-            if combo == known_combo:
+        combo_key = self.get_combination_key(elem1, elem2)
+        for combo, result in self.combinations:
+            if combo == combo_key:  # Now we can compare directly
                 return result
         return None
     
     def add_combination(self, elem1, elem2, result, emoji):
         """Add a new combination to the training data"""
-        combo = frozenset([elem1, elem2])
-        # Remove any existing combination with the same elements
-        self.combinations = {c for c in self.combinations if c[0] != combo}
-        self.combinations.add((combo, (result, emoji)))
+        combo_key = self.get_combination_key(elem1, elem2)
+        
+        # Remove any existing combination with these elements
+        self.combinations = {c for c in self.combinations if tuple(c[0]) != combo_key}
+        
+        # Add the new combination
+        self.combinations.add((combo_key, (result, emoji)))
         
         # Update all_elements and emojis if new elements were introduced
         if result not in self.all_elements:
@@ -107,24 +121,31 @@ class ElementCombiner:
         
         # Convert combinations to training data
         for combo, (result, _) in self.combinations:
-            # Create both orderings of elements for training
-            elements = list(combo)
-            pairs = [(elements[0], elements[1]), (elements[1], elements[0])]
+            # Get both elements from the tuple
+            print(combo)
+            elem1, elem2 = tuple(combo)
             
-            for elem1, elem2 in pairs:
-                # Encode input elements
-                elem1_encoded = self.element_encoder.transform([elem1])[0]
-                elem2_encoded = self.element_encoder.transform([elem2])[0]
-                
-                # Create input vector
-                input_vector = np.zeros(len(self.all_elements) * 2)
-                input_vector[elem1_encoded] = 1
-                input_vector[elem2_encoded + len(self.all_elements)] = 1
-                
-                X.append(input_vector)
-                
-                # Encode output
-                result_encoded = self.element_encoder.transform([result])[0]
+            # Encode input elements
+            elem1_encoded = self.element_encoder.transform([elem1])[0]
+            elem2_encoded = self.element_encoder.transform([elem2])[0]
+            
+            # Encode output
+            result_encoded = self.element_encoder.transform([result])[0]
+            
+            # Create input vector
+            input_vector = np.zeros(len(self.all_elements) * 2)
+            input_vector[elem1_encoded] = 1
+            input_vector[elem2_encoded + len(self.all_elements)] = 1
+            
+            X.append(input_vector)
+            y.append(result_encoded)
+            
+            # For different elements, also add reversed combination
+            if elem1 != elem2:
+                input_vector_rev = np.zeros(len(self.all_elements) * 2)
+                input_vector_rev[elem2_encoded] = 1
+                input_vector_rev[elem1_encoded + len(self.all_elements)] = 1
+                X.append(input_vector_rev)
                 y.append(result_encoded)
         
         X = np.array(X)
@@ -160,21 +181,24 @@ class ElementCombiner:
         
         # Create a set of all possible combinations
         all_possible = set()
-        for i in range(len(all_elements_list)):
-            for j in range(len(all_elements_list)):
-                if (all_elements_list[i] != "" and all_elements_list[j] != "" and all_elements_list[i] != all_elements_list[j]):
-                    all_possible.add(frozenset([all_elements_list[i], all_elements_list[j]]))
+        for i, elem1 in enumerate(all_elements_list):
+            # Include same-element combinations
+            if elem1 != "":
+                all_possible.add(tuple([elem1, elem1]))
+            # Include combinations with other elements
+            for elem2 in all_elements_list[i:]:  # Start from i to avoid duplicates
+                if elem1 != "" and elem2 != "" and elem1 != elem2:
+                    all_possible.add(tuple(sorted([elem1, elem2])))
         
         # Get set of existing combinations
-        existing_combos = {combo for combo, _ in self.combinations}
+        existing_combos = {tuple(combo) for combo, _ in self.combinations}
         
         # Find combinations that don't exist yet
         uncombined = list(all_possible - existing_combos)
         
         if uncombined:
             # Prioritize uncombined pairs
-            t = random.choice(uncombined)
-            chosen_pair = list(t)
+            chosen_pair = random.choice(uncombined)
             return chosen_pair[0], chosen_pair[1]
         else:
             # If all pairs are combined, choose random elements
@@ -246,7 +270,7 @@ class ElementCombiner:
         
         model.save(os.path.join(base_path, "model.keras"))
         
-        # Convert frozensets to lists for JSON serialization
+        # Convert tuple to lists for JSON serialization
         serializable_combinations = [
             ([list(combo), list(result)]) for combo, result in self.combinations
         ]
@@ -282,7 +306,7 @@ class ElementCombiner:
             
         instance.base_elements = state['base_elements']
         instance.combinations = {
-            (frozenset(combo), tuple(result)) for [combo, result] in state['combinations']
+            (tuple(combo), tuple(result)) for [combo, result] in state['combinations']
         }
         instance.all_elements = state['all_elements']
         
