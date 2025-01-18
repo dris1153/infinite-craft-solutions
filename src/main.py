@@ -122,7 +122,6 @@ class ElementCombiner:
         # Convert combinations to training data
         for combo, (result, _) in self.combinations:
             # Get both elements from the tuple
-            print(combo)
             elem1, elem2 = tuple(combo)
             
             # Encode input elements
@@ -175,7 +174,18 @@ class ElementCombiner:
         X, y = self.prepare_data()
         model.fit(X, y, epochs=epochs, verbose=0)
 
-    def get_random_elements(self):
+    def get_train_elements(self, uncombined, index):
+        # Prioritize uncombined pairs
+        chosen_pair = uncombined[index]
+        return chosen_pair[0], chosen_pair[1]
+
+    def auto_train(self, model, amount, auto_pass=False):
+        """Auto train the model with random combinations"""
+        trained_count = 0
+        
+        print(f"\nStarting auto training for {amount} combinations...")
+        print("Press Ctrl+C to stop at any time\n")
+        
         """Get two random elements, prioritizing uncombined pairs"""
         all_elements_list = list(self.all_elements)
         
@@ -196,26 +206,9 @@ class ElementCombiner:
         # Find combinations that don't exist yet
         uncombined = list(all_possible - existing_combos)
         
-        if uncombined:
-            # Prioritize uncombined pairs
-            chosen_pair = random.choice(uncombined)
-            return chosen_pair[0], chosen_pair[1]
-        else:
-            # If all pairs are combined, choose random elements
-            elem1 = random.choice(all_elements_list)
-            elem2 = random.choice(all_elements_list)
-            return elem1, elem2
-
-    def auto_train(self, model, amount, auto_pass=False):
-        """Auto train the model with random combinations"""
-        trained_count = 0
-        
-        print(f"\nStarting auto training for {amount} combinations...")
-        print("Press Ctrl+C to stop at any time\n")
-        
         try:
             while trained_count < amount:
-                elem1, elem2 = self.get_random_elements()
+                elem1, elem2 = self.get_train_elements(uncombined, trained_count)
                 result, emoji, confidence = self.predict_combination(model, elem1, elem2)
                 
                 print(f"\nTrying combination {trained_count + 1}/{amount}")
@@ -229,8 +222,6 @@ class ElementCombiner:
                     if auto_pass:
                         if confidence < 1.0:
                             self.add_combination(elem1, elem2, result, emoji)
-                            model = self.create_model()
-                            self.train_model(model)
                             print("Combination automatically added!")
                             trained_count += 1
                     else:
@@ -255,9 +246,11 @@ class ElementCombiner:
                             trained_count += 1
                 else:
                     print("\nFailed to generate combination. Trying another...")
+                    trained_count += 1
                     
                 print(f"\nProgress: {trained_count}/{amount} combinations trained")
-                
+            model = self.create_model()
+            self.train_model(model)  
         except KeyboardInterrupt:
             print("\n\nAuto training interrupted by user")
         
@@ -289,7 +282,31 @@ class ElementCombiner:
             pickle.dump(self.element_encoder, f)
             
         print(f"Model saved in folder: {base_path}")
-            
+          
+    # Add this new method to the ElementCombiner class
+    def get_stats(self):
+        """Get statistics about the current model state"""
+        stats = {
+            'total_elements': len(self.all_elements),
+            'base_elements': len(self.base_elements),
+            'derived_elements': len(self.all_elements) - len(self.base_elements),
+            'total_combinations': len(self.combinations),
+            'most_versatile_elements': self._get_most_versatile_elements(),
+        }
+        print("5")
+        return stats
+
+    def _get_most_versatile_elements(self):
+        """Find elements that appear in the most combinations"""
+        element_counts = {}
+        for combo, _ in self.combinations:
+            for elem in combo:
+                element_counts[elem] = element_counts.get(elem, 0) + 1
+        
+        # Get top 3 most used elements
+        sorted_elements = sorted(element_counts.items(), key=lambda x: x[1], reverse=True)
+        return [(elem, count) for elem, count in sorted_elements[:3]]
+
     @classmethod
     def load_state(cls, model_name):
         """Load a saved state"""
@@ -399,7 +416,8 @@ def main():
     print("2. Load existing model")
     print("3. Gen element code")
     print("4. Auto train multi combination")
-    choice = input("Enter choice (1-4): ")
+    print("5. Get model stats")
+    choice = input("Enter choice (1-5): ")
     
     if choice == "2":
         # Show available models
@@ -534,6 +552,53 @@ def main():
         if save_choice == 'yes':
             model_name = input("Enter model name: ")
             combiner.save_state(model, model_name)
+        
+        return
+    elif choice == "5":
+        # Handle stats display
+        print("\nSelect a model to analyze:")
+        available_models = ElementCombiner.list_available_models()
+        
+        if not available_models:
+            print("No saved models found. Using default model...")
+            combiner = ElementCombiner()
+        else:
+            print("\nAvailable models:")
+            for i, model_name in enumerate(available_models, 1):
+                print(f"{i}. {model_name}")
+            
+            model_choice = input("\nEnter model number or name (or press Enter for default): ")
+            
+            if not model_choice:
+                combiner = ElementCombiner()
+            else:
+                try:
+                    idx = int(model_choice) - 1
+                    if 0 <= idx < len(available_models):
+                        model_name = available_models[idx]
+                    else:
+                        model_name = model_choice
+                except ValueError:
+                    model_name = model_choice
+                try:
+                    combiner = ElementCombiner.load_state(model_name)
+                except FileNotFoundError:
+                    print(f"Model not found. Using default model...")
+                    combiner = ElementCombiner()
+        # Get and display stats
+        stats = combiner.get_stats()
+        
+        print("\n📊 Model Statistics 📊")
+        print("=" * 40)
+        print(f"Total Elements: {stats['total_elements']}")
+        print(f"├─ Base Elements: {stats['base_elements']}")
+        print(f"└─ Derived Elements: {stats['derived_elements']}")
+        print(f"\nTotal Combinations: {stats['total_combinations']}")
+        
+        print("\nMost Versatile Elements:")
+        for elem, count in stats['most_versatile_elements']:
+            emoji = combiner.element_emojis.get(elem, '')
+            print(f"├─ {elem} {emoji}: {count} combinations")
         
         return
     else:
