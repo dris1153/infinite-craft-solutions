@@ -23,6 +23,8 @@ class ElementCombiner:
             'earth': '🌎'
         }
         
+        self.invalid_combinations = set()
+        
         # Store combinations as sorted tuples for different elements
         self.combinations = {
             (tuple(sorted(['water', 'fire'])), ('steam', '💨')),
@@ -41,6 +43,7 @@ class ElementCombiner:
         self._initialize_elements()
     
     def _initialize_elements(self):
+        """Initialize elements and encoders"""
         # Create a set of all unique elements
         self.all_elements = set(self.base_elements.keys())
         self.element_emojis = dict(self.base_elements)
@@ -51,19 +54,35 @@ class ElementCombiner:
             self.all_elements.update(combo)
             self.element_emojis[result_name] = result_emoji
         
+        # Convert to sorted list for consistent encoding
         self.all_elements = list(sorted(self.all_elements))
         
-        # Initialize label encoders
+        # Initialize label encoder
         self.element_encoder = LabelEncoder()
         self.element_encoder.fit(self.all_elements)
+        
+    def add_invalid_combination(self, elem1, elem2):
+        """Add a combination that's known to be invalid"""
+        combo_key = self.get_combination_key(elem1, elem2)
+        self.invalid_combinations.add(combo_key)
 
+    def is_invalid_combination(self, elem1, elem2):
+        """Check if a combination is known to be invalid"""
+        combo_key = self.get_combination_key(elem1, elem2)
+        return combo_key in self.invalid_combinations
+ 
     def get_api_combination(self, elem1, elem2):
         """Get combination result from the API"""
         try:
             response = requests.get(f'https://infiniteback.org/pair?first={elem1.capitalize()}&second={elem2.capitalize()}')
             if response.status_code == 200:
                 data = response.json()
-                return data['result'].lower(), data['emoji']
+                print("+++",data,"+++")
+                if data is not None:
+                    return data['result'].lower(), data['emoji']
+                else:
+                    self.add_invalid_combination(elem1, elem2)
+                    return None, None
             return None, None
         except Exception as e:
             print(f"API Error: {e}")
@@ -71,6 +90,9 @@ class ElementCombiner:
 
     def predict_combination(self, model, element1, element2):
         """Predict the result of combining two elements"""
+        # First check if this is a known invalid combination
+        if self.is_invalid_combination(element1, element2):
+            return None, None, 1.0
         # First check if this is a known combination
         known_result = self.get_combination_result(element1, element2)
         if known_result is not None:
@@ -80,6 +102,8 @@ class ElementCombiner:
         new_element, emoji = self.get_api_combination(element1, element2)
         if new_element and emoji:
             return new_element, emoji, 0.5
+        elif new_element is None:  # API indicated invalid combination
+            return None, None, 0.5
         
         # Fallback to model prediction if API fails
         return None, None, 0.0
@@ -115,31 +139,36 @@ class ElementCombiner:
             self.element_encoder.fit(self.all_elements)
 
     def prepare_data(self):
-        """Prepare training data for the model"""
+        """Prepare training data for the model including invalid combinations"""
         X = []  # Input combinations
         y = []  # Results
         
-        # Convert combinations to training data
+        # Get the total number of classes including valid elements and invalid combination class
+        num_classes = len(self.all_elements)
+        
+        # Convert valid combinations to training data
         for combo, (result, _) in self.combinations:
-            # Get both elements from the tuple
             elem1, elem2 = tuple(combo)
             
             # Encode input elements
             elem1_encoded = self.element_encoder.transform([elem1])[0]
             elem2_encoded = self.element_encoder.transform([elem2])[0]
             
-            # Encode output
-            result_encoded = self.element_encoder.transform([result])[0]
-            
             # Create input vector
             input_vector = np.zeros(len(self.all_elements) * 2)
             input_vector[elem1_encoded] = 1
             input_vector[elem2_encoded + len(self.all_elements)] = 1
             
+            # For valid combinations, use the actual result class
+            result_encoded = self.element_encoder.transform([result])[0]
+            if result_encoded >= num_classes:
+                # If the result_encoded is too large, skip this combination
+                continue
+            
             X.append(input_vector)
             y.append(result_encoded)
             
-            # For different elements, also add reversed combination
+            # Add reversed combination if elements are different
             if elem1 != elem2:
                 input_vector_rev = np.zeros(len(self.all_elements) * 2)
                 input_vector_rev[elem2_encoded] = 1
@@ -147,15 +176,55 @@ class ElementCombiner:
                 X.append(input_vector_rev)
                 y.append(result_encoded)
         
+        # Add invalid combinations to training data
+        for combo in self.invalid_combinations:
+            elem1, elem2 = tuple(combo)
+            
+            try:
+                # Encode input elements
+                elem1_encoded = self.element_encoder.transform([elem1])[0]
+                elem2_encoded = self.element_encoder.transform([elem2])[0]
+                
+                # Create input vector
+                input_vector = np.zeros(len(self.all_elements) * 2)
+                input_vector[elem1_encoded] = 1
+                input_vector[elem2_encoded + len(self.all_elements)] = 1
+                
+                # For invalid combinations, use the last class index
+                invalid_class = num_classes - 1
+                
+                X.append(input_vector)
+                y.append(invalid_class)
+                
+                # Add reversed combination if elements are different
+                if elem1 != elem2:
+                    input_vector_rev = np.zeros(len(self.all_elements) * 2)
+                    input_vector_rev[elem2_encoded] = 1
+                    input_vector_rev[elem1_encoded + len(self.all_elements)] = 1
+                    X.append(input_vector_rev)
+                    y.append(invalid_class)
+            except Exception as e:
+                print(f"Error processing invalid combination {elem1} + {elem2}: {e}")
+                continue
+        
+        if not X:  # Check if we have any valid training data
+            raise ValueError("No valid training data could be generated")
+        
         X = np.array(X)
-        y = to_categorical(y, num_classes=len(self.all_elements))
+        y = np.array(y)
+        
+        # Verify that all labels are within valid range
+        if np.any(y >= num_classes):
+            raise ValueError(f"Found label(s) >= number of classes ({num_classes})")
+        
+        y = to_categorical(y, num_classes=num_classes)
         
         return X, y
     
     def create_model(self):
-        """Create and return a new neural network model"""
+        """Create and return a new neural network model with invalid combination support"""
         input_dim = len(self.all_elements) * 2
-        output_dim = len(self.all_elements)
+        output_dim = len(self.all_elements)  # Number of valid elements
         
         model = Sequential([
             Dense(64, activation='relu', input_dim=input_dim),
@@ -164,10 +233,11 @@ class ElementCombiner:
         ])
         
         model.compile(optimizer='adam',
-                     loss='categorical_crossentropy',
-                     metrics=['accuracy'])
+                    loss='categorical_crossentropy',
+                    metrics=['accuracy'])
         
         return model
+
     
     def train_model(self, model, epochs=200):
         """Train the model on the current combinations"""
@@ -203,17 +273,24 @@ class ElementCombiner:
         # Get set of existing combinations
         existing_combos = {tuple(combo) for combo, _ in self.combinations}
         
+        # Get set of invalid combinations
+        invalid_combos = {tuple(combo) for combo in self.invalid_combinations}
+        
         # Find combinations that don't exist yet
-        uncombined = list(all_possible - existing_combos)
+        uncombined = list(all_possible - existing_combos - invalid_combos)
         
         try:
             while trained_count < amount:
+                
+                print("-------------------------------------")
+                
                 elem1, elem2 = self.get_train_elements(uncombined, trained_count)
-                result, emoji, confidence = self.predict_combination(model, elem1, elem2)
                 
                 print(f"\nTrying combination {trained_count + 1}/{amount}")
                 print(f"Elements: {elem1} {self.element_emojis.get(elem1, '')} + "
                     f"{elem2} {self.element_emojis.get(elem2, '')}")
+                
+                result, emoji, confidence = self.predict_combination(model, elem1, elem2)
                 
                 if result:
                     print(f"Predicted result: {result} {emoji}")
@@ -234,14 +311,10 @@ class ElementCombiner:
                             correct_emoji = input("What emoji should represent this result? ")
                             
                             self.add_combination(elem1, elem2, correct_result, correct_emoji)
-                            model = self.create_model()
-                            self.train_model(model)
                             print("\nCombination added to known combinations!")
                             trained_count += 1
                         elif agree_result == 'yes' and confidence < 1.0:
                             self.add_combination(elem1, elem2, result, emoji)
-                            model = self.create_model()
-                            self.train_model(model)
                             print("\nSuggested combination added to known combinations!")
                             trained_count += 1
                 else:
@@ -257,7 +330,7 @@ class ElementCombiner:
         return model
     
     def save_state(self, model, model_name):
-        """Save model, combinations, and encoder state"""
+        """Save model, combinations, invalid combinations, and encoder state"""
         base_path = os.path.join(data_path, model_name)
         os.makedirs(base_path, exist_ok=True)
         
@@ -268,9 +341,13 @@ class ElementCombiner:
             ([list(combo), list(result)]) for combo, result in self.combinations
         ]
         
+        # Convert invalid combinations to list of lists for JSON
+        serializable_invalid = [list(combo) for combo in self.invalid_combinations]
+        
         state = {
             'base_elements': self.base_elements,
             'combinations': serializable_combinations,
+            'invalid_combinations': serializable_invalid,
             'all_elements': self.all_elements,
             'element_emojis': self.element_emojis
         }
@@ -291,6 +368,7 @@ class ElementCombiner:
             'base_elements': len(self.base_elements),
             'derived_elements': len(self.all_elements) - len(self.base_elements),
             'total_combinations': len(self.combinations),
+            'total_invalid_combinations': len(self.invalid_combinations),
             'most_versatile_elements': self._get_most_versatile_elements(),
         }
         print("5")
@@ -325,19 +403,14 @@ class ElementCombiner:
         instance.combinations = {
             (tuple(combo), tuple(result)) for [combo, result] in state['combinations']
         }
-        instance.all_elements = state['all_elements']
         
-        # Handle backward compatibility for element_emojis
-        if 'element_emojis' in state:
-            instance.element_emojis = state['element_emojis']
-        else:
-            # Reconstruct element_emojis from base_elements and combinations
-            instance.element_emojis = dict(instance.base_elements)
-            for combo, (result, emoji) in instance.combinations:
-                if isinstance(result, str):  # Handle old format where result might be just a string
-                    instance.element_emojis[result] = '❓'  # Default emoji for old entries
-                else:
-                    instance.element_emojis[result[0]] = result[1]
+        # Load invalid combinations
+        instance.invalid_combinations = {
+            tuple(combo) for combo in state.get('invalid_combinations', [])
+        }
+        
+        instance.all_elements = state['all_elements']
+        instance.element_emojis = state.get('element_emojis', dict(instance.base_elements))
         
         with open(os.path.join(base_path, "encoder.pkl"), 'rb') as f:
             instance.element_encoder = pickle.load(f)
@@ -594,6 +667,7 @@ def main():
         print(f"├─ Base Elements: {stats['base_elements']}")
         print(f"└─ Derived Elements: {stats['derived_elements']}")
         print(f"\nTotal Combinations: {stats['total_combinations']}")
+        print(f"Total Invalid Combinations: {stats['total_invalid_combinations']}")
         
         print("\nMost Versatile Elements:")
         for elem, count in stats['most_versatile_elements']:
